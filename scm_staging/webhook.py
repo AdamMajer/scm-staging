@@ -326,6 +326,24 @@ class MainHandler(tornado.web.RequestHandler):
         devel_prj = await find_devel_project(
             osc, matching_branch_conf.destination_project, pkg.name
         )
+        issue_api = IssueApi(self.app_config._api_client)
+        comments = await issue_api.issue_get_comments(
+            owner=payload.pull_request.base.repo.owner.login,
+            repo=payload.pull_request.base.repo.name,
+            index=payload.pull_request.number,
+        )
+        comments.reverse()
+        ref_hash = f"Ref: {payload.pull_request.head.sha}"
+        for comment in comments:
+            # check our latest comment for data about this request
+            if comment.user and comment.body and comment.user.login == self.app_config.gitea_user:
+                if ref_hash in comment.body.splitlines():
+                    LOGGER.debug(
+                        "Already submitted request for: %s. Ignoring changes.",
+                        ref_hash
+                    )
+                    return
+                break
 
         if (
             sr_style := matching_branch_conf.submission_style
@@ -457,13 +475,12 @@ class MainHandler(tornado.web.RequestHandler):
         )
 
         # comment on the PR with a link to the SR
-        issue_api = IssueApi(self.app_config._api_client)
         await issue_api.issue_create_comment(
             payload.repository.owner.login,
             payload.repository.name,
             payload.pull_request.number,
             body=CreateIssueCommentOption(
-                body=f"Created submit request [sr#{new_req.id}](https://build.opensuse.org/request/show/{new_req.id})"
+                body=f"Created submit request [sr#{new_req.id}](https://build.opensuse.org/request/show/{new_req.id})\n{ref_hash}"
             ),
         )
 
