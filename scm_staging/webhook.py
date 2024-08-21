@@ -345,6 +345,15 @@ class MainHandler(tornado.web.RequestHandler):
                     return
                 break
 
+        # if devel project is scmsync, then create sr from devel project to target
+        direct_pr_from_devel = False
+        if devel_prj:
+            devel_prj_meta = await project.fetch_meta(osc,prj=devel_prj.project)
+            xmlsync = devel_prj_meta.meta.findtext("xmlsync")
+            if xmlsync and xmlsync.startswith(f"https://src.opensuse.org/{payload.pull_request.head.repo.owner.login}/"):
+                # devel_prj is the source of the PR, so just do a regular PR
+                direct_pr_from_devel = True
+
         if (
             sr_style := matching_branch_conf.submission_style
         ) == SubmissionStyle.DIRECT:
@@ -361,11 +370,16 @@ class MainHandler(tornado.web.RequestHandler):
         else:
             assert False, f"Invalid submission style {sr_style}"
 
-        prj = await self.project_from_pull_request(
-            payload,
-            matching_branch_conf.project_prefix,
-            project_to_copy_repos_from=devel_prj.project if devel_prj else dest_prj,
-        )
+
+        if direct_pr_from_devel:
+            prj = devel_prj.project
+        else:
+            created_project = await self.project_from_pull_request(
+                payload,
+                matching_branch_conf.project_prefix,
+                project_to_copy_repos_from=devel_prj.project if devel_prj else dest_prj,
+            )
+            prj = created_project.name
 
         # previously opened requests from the existing project for this specific
         # PR
@@ -404,7 +418,7 @@ class MainHandler(tornado.web.RequestHandler):
                 await project.delete(osc, prj=prj, force=True)
             except ClientResponseError as cre_exc:
                 if cre_exc.status == 404:
-                    LOGGER.debug("Not deleting project %s, it doesn't exist", prj.name)
+                    LOGGER.debug("Not deleting project %s, it doesn't exist", prj)
                 else:
                     raise
             return
@@ -422,7 +436,7 @@ class MainHandler(tornado.web.RequestHandler):
             repo_name=base.repo.name,
             commit_sha=payload.pull_request.head.sha,
             pkg_name=pkg.name,
-            project_name=prj.name,
+            project_name=prj,
         )
 
         # don't create SRs for not approved PRs
@@ -440,8 +454,9 @@ class MainHandler(tornado.web.RequestHandler):
             else:
                 LOGGER.debug("PR is approved, proceeding")
 
-        await project.send_meta(osc, prj=prj)
-        await project.send_meta(osc, prj=prj, pkg=pkg)
+        if not direct_pr_from_devel:
+            await project.send_meta(osc, prj=created_project)
+            await project.send_meta(osc, prj=created_project, pkg=pkg)
         await service_wait(osc, prj, pkg)
 
         new_req = await request.submit_package(
@@ -466,7 +481,7 @@ class MainHandler(tornado.web.RequestHandler):
             PullRequestToSubmitRequest(
                 submit_request_id=new_req.id,
                 obs_package_name=pkg.name,
-                obs_project_name=prj.name,
+                obs_project_name=prj,
                 gitea_repo_owner=base.repo.owner.login,
                 gitea_repo_name=base.repo.name,
                 pull_request_number=payload.pull_request.number,
